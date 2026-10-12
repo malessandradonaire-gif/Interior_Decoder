@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { TIERS, type SpecContent, type Swatch } from "@/lib/types";
+import { WhereToBuy } from "./WhereToBuy";
 
 export function confidenceLabel(value: number) {
   if (value >= 0.75) return { label: "High", bar: "bg-emerald-600", text: "text-emerald-700" };
@@ -143,6 +144,8 @@ export function SpecView({ spec, image }: { spec: SpecContent; image?: string })
           </ul>
         </Section>
       </div>
+
+      <WhereToBuy spec={spec} />
     </div>
   );
 }

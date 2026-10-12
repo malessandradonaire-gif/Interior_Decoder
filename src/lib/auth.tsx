@@ -1,13 +1,16 @@
 "use client";
 
-// Demo auth: a name + email kept in localStorage, no password and no server.
-// Replace with Supabase Auth later; components only use useAuth()/useUser().
+// Demo auth: accounts with hashed passwords live in IndexedDB (see ./accounts); the signed-in
+// session is kept in localStorage. Replace with Supabase Auth later; components only use useAuth()/useUser().
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import type { User } from "./types";
+import { registerAccount, verifyAccount, type AuthResult } from "./accounts";
 import { PageLoading } from "@/components/ui";
 
 const SESSION_KEY = "decoder.session";
+// Sessions from the password-less demo had no version and are treated as signed out.
+const SESSION_VERSION = 2;
 const listeners = new Set<() => void>();
 
 function subscribe(onChange: () => void) {
@@ -40,10 +43,16 @@ function writeSession(value: string | null) {
   listeners.forEach((l) => l());
 }
 
+function startSession(result: AuthResult): AuthResult {
+  if (result.ok) writeSession(JSON.stringify({ ...result.user, v: SESSION_VERSION }));
+  return result;
+}
+
 interface AuthState {
   user: User | null;
   ready: boolean;
-  signIn: (name: string, email: string) => void;
+  signIn: (email: string, password: string) => Promise<AuthResult>;
+  signUp: (name: string, email: string, password: string) => Promise<AuthResult>;
   signOut: () => void;
 }
 
@@ -57,7 +66,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let user: User | null = null;
     if (raw) {
       try {
-        user = JSON.parse(raw) as User;
+        const session = JSON.parse(raw) as User & { v?: number };
+        if (session.v === SESSION_VERSION) user = { id: session.id, email: session.email, name: session.name };
       } catch {
         user = null;
       }
@@ -65,10 +75,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return {
       user,
       ready: raw !== undefined,
-      signIn: (name, email) => {
-        const normalized = email.trim().toLowerCase();
-        writeSession(JSON.stringify({ id: normalized, email: normalized, name: name.trim() }));
-      },
+      signIn: async (email, password) => startSession(await verifyAccount(email, password)),
+      signUp: async (name, email, password) => startSession(await registerAccount(name, email, password)),
       signOut: () => writeSession(null),
     };
   }, [raw]);
