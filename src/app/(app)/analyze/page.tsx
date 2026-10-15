@@ -1,11 +1,12 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useUser } from "@/lib/auth";
 import { analyzeImage } from "@/lib/analyzer";
 import { createBoard, listBoards, saveSpec } from "@/lib/db";
 import { fileToResizedDataUrl, MAX_UPLOAD_BYTES } from "@/lib/image";
+import { fileFromImageUrl, ImageSourceError, imageFileFrom, imageUrlFrom } from "@/lib/image-source";
 import type { SpecContent } from "@/lib/types";
 import { useLoader } from "@/lib/use-loader";
 import { SpecView } from "@/components/SpecView";
@@ -16,6 +17,7 @@ const STEPS = ["Reading surfaces", "Extracting the color palette", "Matching mat
 
 type Phase =
   | { kind: "idle" }
+  | { kind: "fetching" }
   | { kind: "analyzing"; image: string }
   | { kind: "done"; image: string; spec: SpecContent }
   | { kind: "error"; message: string };
@@ -38,7 +40,7 @@ function AnalyzingSteps() {
   );
 }
 
-function Dropzone({ onFile }: { onFile: (file: File) => void }) {
+function Dropzone({ onFile, onTransfer }: { onFile: (file: File) => void; onTransfer: (data: DataTransfer) => void }) {
   const [over, setOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -51,15 +53,19 @@ function Dropzone({ onFile }: { onFile: (file: File) => void }) {
       onDrop={(e) => {
         e.preventDefault();
         setOver(false);
-        const file = e.dataTransfer.files[0];
-        if (file) onFile(file);
+        onTransfer(e.dataTransfer);
       }}
       className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-20 text-center transition ${
         over ? "border-accent bg-accent-soft/60" : "border-line bg-card hover:border-ink/30"
       }`}
     >
       <span className="font-serif text-2xl">Drop a photo of a space you love</span>
-      <span className="mt-2 text-sm text-muted">or click to choose a file · JPG, PNG, WEBP up to 15 MB</span>
+      <span className="mt-2 max-w-md text-sm text-muted">
+        From your computer, or drag a picture straight from Pinterest or another tab. You can also paste a copied image
+        with <kbd className="rounded border border-line bg-paper px-1.5 py-0.5 font-mono text-xs">Ctrl</kbd>+
+        <kbd className="rounded border border-line bg-paper px-1.5 py-0.5 font-mono text-xs">V</kbd> (⌘V on Mac).
+      </span>
+      <span className="mt-1 text-xs text-muted/80">JPG, PNG, WEBP up to 15 MB</span>
       <span className={`${btn.secondary} mt-6`}>Choose photo</span>
       <input
         ref={inputRef}
@@ -88,12 +94,42 @@ function AnalyzeFlow() {
   const [newBoardName, setNewBoardName] = useState("");
   const [saving, setSaving] = useState(false);
 
-  if (loading || !boards) return <PageLoading />;
+  const acceptsImage = phase.kind === "idle" || phase.kind === "error";
+  const onPaste = useEffectEvent((e: ClipboardEvent) => {
+    e.preventDefault();
+    handleTransfer(e.clipboardData, "paste");
+  });
+  useEffect(() => {
+    if (!acceptsImage) return;
+    const listener = (e: ClipboardEvent) => onPaste(e);
+    window.addEventListener("paste", listener);
+    return () => window.removeEventListener("paste", listener);
+  }, [acceptsImage]);
 
-  const selectedBoard =
-    boardChoice ||
-    (requestedBoard && boards.some((b) => b.id === requestedBoard) ? requestedBoard : boards[0]?.id) ||
-    NEW_BOARD;
+  async function handleTransfer(data: DataTransfer | null, source: "paste" | "drop") {
+    const file = imageFileFrom(data);
+    if (file) return handleFile(file);
+    const url = imageUrlFrom(data);
+    if (!url) {
+      setPhase({
+        kind: "error",
+        message:
+          source === "paste"
+            ? "There's no image on your clipboard. Right-click a picture, choose “Copy image”, then paste here."
+            : "That didn't contain an image. Try dragging the picture itself.",
+      });
+      return;
+    }
+    setPhase({ kind: "fetching" });
+    try {
+      await handleFile(await fileFromImageUrl(url));
+    } catch (err) {
+      setPhase({
+        kind: "error",
+        message: err instanceof ImageSourceError ? err.message : "Couldn't get that image. Try saving it and uploading.",
+      });
+    }
+  }
 
   async function handleFile(file: File) {
     if (!file.type.startsWith("image/")) {
@@ -129,7 +165,14 @@ function AnalyzeFlow() {
     }
   }
 
+  if (loading || !boards) return <PageLoading />;
+
+  const selectedBoard =
+    boardChoice ||
+    (requestedBoard && boards.some((b) => b.id === requestedBoard) ? requestedBoard : boards[0]?.id) ||
+    NEW_BOARD;
   const canSave = selectedBoard !== NEW_BOARD || newBoardName.trim().length > 0;
+  const dropzone = <Dropzone onFile={handleFile} onTransfer={(data) => handleTransfer(data, "drop")} />;
 
   return (
     <div>
@@ -137,12 +180,20 @@ function AnalyzeFlow() {
       <p className="mt-1 text-muted">Get the style, likely materials, palette, hardware and price tier of any space.</p>
 
       <div className="mt-8">
-        {phase.kind === "idle" && <Dropzone onFile={handleFile} />}
+        {phase.kind === "idle" && dropzone}
+
+        {phase.kind === "fetching" && (
+          <div className="flex items-center justify-center gap-3 rounded-2xl border border-line bg-card px-6 py-24 text-muted">
+            <Spinner /> Getting the image…
+          </div>
+        )}
 
         {phase.kind === "error" && (
           <div className="space-y-4">
-            <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{phase.message}</p>
-            <Dropzone onFile={handleFile} />
+            <p role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+              {phase.message}
+            </p>
+            {dropzone}
           </div>
         )}
 
